@@ -1,0 +1,19 @@
+# Secrets — copy .env.sample to .env locally; never commit
+.env
+
+# ~23 GB model checkpoint (downloaded by start.sh, bind-mounted read-only)
+models/
+
+# Triton / ROCm / HuggingFace caches (kernel builds, download cache)
+.cache/
+
+# Engine log streamed by start.sh
+.inkling.log
+
+# Editor / OS junk
+.DS_Store
+Thumbs.db
+*.swp
+*~
+__pycache__/
+*.pyc
