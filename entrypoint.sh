@@ -7,7 +7,7 @@
 # smoke test's default); start.sh remaps the host port with -p.
 set -euo pipefail
 
-PREFIX="${INKLING_PREFIX:-/opt/inkling/halo-v1.5.0}"
+PREFIX="${INKLING_PREFIX:-/opt/inkling/halo-v1.6.0}"
 MODEL="${MODEL_PATH:-/models}"
 
 args=(
@@ -26,6 +26,9 @@ args=(
 [[ -n "${INKLING_KV_MIB:-}" ]] && args+=(--kv-mib "$INKLING_KV_MIB")
 [[ "${INKLING_TOOLS:-1}" == "1" ]] && args+=(--tools)
 
+# DFlash 2 drafter (serve.sh also reads INKLING_DFLASH2_MODEL from the env;
+# passing the flag explicitly keeps --dry-run output unambiguous).
+[[ -n "${INKLING_DFLASH2_MODEL:-}" ]] && args+=(--dflash2 "${INKLING_DFLASH2_MODEL}")
 # Space-separated extra serve.sh flags, e.g. INKLING_EXTRA_ARGS="--no-graphs"
 # or "--prefill-chunk-tokens 8192". No '=' inside values.
 if [[ -n "${INKLING_EXTRA_ARGS:-}" ]]; then

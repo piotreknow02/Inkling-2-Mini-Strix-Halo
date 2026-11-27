@@ -1,6 +1,10 @@
 # Inkling 2 Mini · CIRU Halo Agent (gfx1151) — self-contained ROCm vLLM runtime
 # for AMD Strix Halo (Ryzen AI Max+ 395 / Radeon 8060S).
 #
+# Runtime: v1.6.0 (native W6 WMMA DFlash 2 block-diffusion speculation,
+# --dflash2). The default launch uses DFlash 2; base weights and wheels are
+# unchanged from v1.5.0.
+#
 # No compilation here: the release ships a prebuilt portable gfx1151 ABI v3
 # all-HIP library, so the image is pinned wheels + a patched vLLM/Transformers
 # source overlay installed by scripts/install.sh. The ~23 GB checkpoint is NOT
@@ -28,7 +32,7 @@ ENV PATH=/root/.local/bin:$PATH
 # missing system 3.12 fail loudly instead of pulling a uv-managed interpreter.
 ENV INKLING_VENV=/opt/inkling/venv \
     INKLING_DEPS=/opt/inkling/transformers-deps \
-    INKLING_PREFIX=/opt/inkling/halo-v1.5.0 \
+    INKLING_PREFIX=/opt/inkling/halo-v1.6.0 \
     INKLING_RUNTIME=/opt/inkling/runtime \
     UV_PYTHON_DOWNLOADS=never
 
@@ -56,8 +60,8 @@ RUN uv pip install \
 # Kept after installation (~15 MB) so the upstream smoke test and the weight
 # manifest stay reachable inside the container.
 ARG CIRU_REPO=https://github.com/ciru-ai/Inkling-2-Mini-CIRU-Halo-Agent-gfx1151.git
-ARG CIRU_REVISION=b3870f35926fb322f398e6c373a93098534f8fdb
-RUN git clone --depth 1 --branch v1.5.0 "$CIRU_REPO" "$INKLING_RUNTIME" \
+ARG CIRU_REVISION=64788d4695649aba68d91af384300b8ce370d0b5
+RUN git clone --depth 1 --branch v1.6.0 "$CIRU_REPO" "$INKLING_RUNTIME" \
     && test "$(git -C "$INKLING_RUNTIME" rev-parse HEAD)" = "$CIRU_REVISION"
 
 # install.sh verifies MANIFEST.sha256, checks the wheel versions and the
@@ -91,7 +95,7 @@ RUN chmod +x /opt/inkling/entrypoint.sh
 
 ENV MODEL_PATH=/models \
     INKLING_TRITON_CACHE=/cache/inkling-ciru-triton \
-    INKLING_PREFIX=/opt/inkling/halo-v1.5.0
+    INKLING_PREFIX=/opt/inkling/halo-v1.6.0
 EXPOSE 18753
 # /health is the vLLM route (vllm/entrypoints/serve/instrumentator/health.py):
 # 200 while the engine is alive, 503 on EngineDeadError. start.sh polls the
