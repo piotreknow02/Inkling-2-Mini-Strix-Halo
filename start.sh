@@ -25,10 +25,12 @@ if [[ -f "${SCRIPT_DIR}/.env" ]]; then
   done < "${SCRIPT_DIR}/.env"
 fi
 
-IMAGE="${IMAGE:-inkling-mini-ciru-halo:latest}"
+IMAGE="${IMAGE:-inkling-mini-ciru-halo:v1.6.0}"
 CONTAINER_NAME="${CONTAINER_NAME:-inkling-mini-ciru-halo}"
 PORT="${PORT:-8080}"                          # host publish port (container listens on 18753)
 MODEL_DIR="${MODEL_DIR:-${SCRIPT_DIR}/models}"
+[[ "${MODEL_DIR}" = /* ]] || MODEL_DIR="${SCRIPT_DIR}/${MODEL_DIR}"
+MODEL_DIR="$(realpath -m "${MODEL_DIR}")"  # absolute: the /models bind-mount and the DFLASH2_DIR guard both need it
 CACHE_DIR="${CACHE_DIR:-${SCRIPT_DIR}/.cache}"
 LOG_FILE="${LOG_FILE:-${SCRIPT_DIR}/.inkling.log}"
 READY_TIMEOUT="${READY_TIMEOUT:-3600}"        # seconds; cold first boot is ~65 s + Triton build
@@ -44,6 +46,15 @@ KV_MIB="${KV_MIB:-}"
 BATCH_TOKENS="${BATCH_TOKENS:-4096}"
 TOOLS="${TOOLS:-1}"
 EXTRA_ARGS="${EXTRA_ARGS:-}"                  # extra serve.sh flags, no '=' inside
+# DFlash 2 drafter (separate ~942 MiB checkpoint, host-side download)
+DFLASH2="${DFLASH2:-1}"                                  # 1 = DFlash 2 default; 0 = DSpark
+DFLASH2_DIR="${DFLASH2_DIR:-${MODEL_DIR}/dflash2}"         # drafter lives inside the checkpoint dir
+# A relative DFLASH2_DIR is resolved against the repo root (start.sh's location),
+# matching the .env.sample example (./models/dflash2).
+[[ "${DFLASH2_DIR}" = /* ]] || DFLASH2_DIR="${SCRIPT_DIR}/${DFLASH2_DIR}"
+DFLASH2_DIR="$(realpath -m "${DFLASH2_DIR}")"
+HF_DFLASH2_MODEL="${HF_DFLASH2_MODEL:-incoai/Inkling-2-Mini-DFlash2}"
+HF_DFLASH2_REVISION="${HF_DFLASH2_REVISION:-}"           # empty = latest
 
 # ---- preflight ---------------------------------------------------------------
 command -v podman >/dev/null 2>&1 || { echo "podman is not on PATH"; exit 1; }
@@ -127,6 +138,9 @@ snapshot_download(
     optimized-weights/experts/layer12.pt
     optimized-weights/experts/layer17.pt
     optimized-weights/final-layers/layer20-c1.safetensors
+    optimized-weights/final-layers/layer21-c1.safetensors
+    optimized-weights/final-layers/layer22-c1.safetensors
+    optimized-weights/final-layers/layer23-c1.safetensors
   )
   for marker in "${marker_files[@]}"; do
     if [[ ! -f "${MODEL_DIR}/${marker}" ]]; then
@@ -150,6 +164,44 @@ snapshot_download(
   echo "[$(date -Is)] model checkpoint ready at ${MODEL_DIR}"
 else
   echo "Model checkpoint found at ${MODEL_DIR}; skipping download."
+fi
+
+# ---- DFlash 2 drafter (host-side, resumable) ─────────────────────────────────
+# Separate ~942 MiB checkpoint, no checksum manifest upstream. Lives inside the
+# checkpoint dir and rides the same ro /models mount as the base weights.
+if [[ "${DFLASH2}" == "1" ]]; then
+  # The drafter rides the ro /models bind-mount: it must live under MODEL_DIR.
+  case "${DFLASH2_DIR}" in
+    "${MODEL_DIR}"/*) ;;
+    *) echo "ERROR: DFLASH2_DIR=${DFLASH2_DIR} is not under MODEL_DIR=${MODEL_DIR} — the drafter must stay on the ro /models mount"; exit 1 ;;
+  esac
+  if [[ ! -s "${DFLASH2_DIR}/config.json" || ! -s "${DFLASH2_DIR}/model.safetensors" ]]; then
+    echo "Drafter not found at ${DFLASH2_DIR} — downloading ${HF_DFLASH2_MODEL} ..."
+    mkdir -p "${DFLASH2_DIR}"
+    REV_ARGS=()
+    [[ -n "${HF_DFLASH2_REVISION}" ]] && REV_ARGS=(--revision "${HF_DFLASH2_REVISION}")
+    if command -v hf >/dev/null 2>&1; then
+      hf download "${HF_DFLASH2_MODEL}" "${REV_ARGS[@]}" --local-dir "${DFLASH2_DIR}"
+    elif command -v huggingface-cli >/dev/null 2>&1; then
+      huggingface-cli download "${HF_DFLASH2_MODEL}" "${REV_ARGS[@]}" --local-dir "${DFLASH2_DIR}"
+    elif python3 -c "import huggingface_hub" 2>/dev/null; then
+      HF_MODEL_ENV="${HF_DFLASH2_MODEL}" HF_REVISION_ENV="${HF_DFLASH2_REVISION}" MODEL_DIR_ENV="${DFLASH2_DIR}" python3 -c "
+import os
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id=os.environ['HF_MODEL_ENV'], revision=os.environ.get('HF_REVISION_ENV') or None, local_dir=os.environ['MODEL_DIR_ENV'])
+"
+    else
+      echo "ERROR: hf, huggingface-cli or huggingface_hub not available on host."
+      exit 1
+    fi
+  fi
+  for marker in config.json model.safetensors; do
+    if [[ ! -s "${DFLASH2_DIR}/${marker}" ]]; then
+      echo "ERROR: download completed but ${marker} is missing from ${DFLASH2_DIR}"
+      exit 1
+    fi
+  done
+  echo "[$(date -Is)] DFlash 2 drafter ready at ${DFLASH2_DIR}"
 fi
 
 # ---- container lifecycle (idempotent) ----------------------------------------
@@ -184,6 +236,7 @@ env_args=(
   -e INKLING_TOOLS="${TOOLS}"
 )
 [[ -n "${EXTRA_ARGS}" ]] && env_args+=(-e "INKLING_EXTRA_ARGS=${EXTRA_ARGS}")
+[[ "${DFLASH2}" == "1" ]] && env_args+=(-e "INKLING_DFLASH2_MODEL=/models/${DFLASH2_DIR#${MODEL_DIR}/}")
 
 podman run -d \
   --name "${CONTAINER_NAME}" \
@@ -246,6 +299,7 @@ done
 
 echo "Inkling 2 Mini CIRU Halo Agent is ready"
 echo "OpenAI base URL: http://127.0.0.1:${PORT}/v1"
+[[ "${DFLASH2}" == "1" ]] && echo "DFlash 2 drafter: active (${DFLASH2_DIR} -> /models/${DFLASH2_DIR#${MODEL_DIR}/}, ro)"
 echo "Served model id: main"
 echo "Check model id:  curl -s http://127.0.0.1:${PORT}/v1/models | jq -r '.data[0].id'"
 echo "Run smoke suite: podman exec ${CONTAINER_NAME} /opt/inkling/venv/bin/python /opt/inkling/runtime/scripts/smoke-test.py --base-url http://127.0.0.1:18753/v1 --model main --check-tools"

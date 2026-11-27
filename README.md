@@ -1,8 +1,9 @@
 # Inkling 2 Mini · CIRU Halo Agent — one-command Podman deploy (AMD Strix Halo 128 GB)
 
 Serves [jcbtc/Inkling-2-Mini-CIRU-Halo-Agent-gfx1151](https://huggingface.co/jcbtc/Inkling-2-Mini-CIRU-Halo-Agent-gfx1151)
-(vLLM 0.34.0+rocm100, native RDNA 3.5 all-HIP kernels, dual-depth adaptive DSpark
-speculation, native ROCm vision, native tool calling) in a rootless Podman container on an
+(vLLM 0.34.0+rocm100, native RDNA 3.5 all-HIP kernels, native W6 WMMA DFlash 2
+block-diffusion speculation by default — bundled adaptive DSpark as fallback —
+native ROCm vision, native tool calling) in a rootless Podman container on an
 AMD Strix Halo (Ryzen AI Max+ 395 / Radeon 8060S, `gfx1151`).
 
 Built on the [CIRU runtime](https://github.com/ciru-ai/Inkling-2-Mini-CIRU-Halo-Agent-gfx1151),
@@ -78,7 +79,7 @@ Copy `.env.sample` to `.env` and edit. Precedence (highest first): **exported sh
 
 | Var              | Default                                       | Meaning                                                             |
 | ---------------- | --------------------------------------------- | ------------------------------------------------------------------- |
-| `IMAGE`          | `inkling-mini-ciru-halo:latest`               | Image tag                                                           |
+| `IMAGE`          | `inkling-mini-ciru-halo:v1.6.0`           | Image tag                                                           |
 | `CONTAINER_NAME` | `inkling-mini-ciru-halo`                      | Container name                                                      |
 | `PORT`           | `8080`                                        | Host publish port (container always listens on 18753)               |
 | `MODEL_DIR`      | `./models`                                    | Where the checkpoint lives / downloads to                           |
@@ -94,6 +95,10 @@ Copy `.env.sample` to `.env` and edit. Precedence (highest first): **exported sh
 | `BATCH_TOKENS`   | `4096`                                        | Scheduler `max_num_batched_tokens`                                  |
 | `TOOLS`          | `1`                                           | `1` = native Inkling tool calling; `0` = off                        |
 | `EXTRA_ARGS`     | *(empty)*                                     | Extra `serve.sh` flags, space-separated (no `=` inside), e.g. `--no-graphs` |
+| `DFLASH2`        | `1`                                           | `1` = DFlash 2 drafter (default, separate ~942 MiB checkpoint); `0` = bundled DSpark |
+| `DFLASH2_DIR`    | `./models/dflash2`                            | Drafter checkpoint dir; must live under `MODEL_DIR` (rides the ro `/models` mount) |
+| `HF_DFLASH2_MODEL` | `incoai/Inkling-2-Mini-DFlash2`             | Drafter HuggingFace repo                                            |
+| `HF_DFLASH2_REVISION` | *(latest)*                               | Pin a drafter commit for reproducibility                            |
 | `HF_TOKEN`       | *(unset)*                                     | Optional HuggingFace token — higher download rate limits            |
 
 The container **always** listens on `18753` internally (serve.sh's own default, also what the upstream smoke test hard-codes); `start.sh` remaps it to `PORT` with `-p "${PORT}:18753"`.
@@ -105,15 +110,17 @@ The `Containerfile` builds a self-contained image — no compilation:
 1. Ubuntu 24.04 base with runtime libs only (`libnuma1`, `git`/`curl`, `python3` 3.12).
 2. `uv` for Python management; `uv venv --python /usr/bin/python3.12` (the ROCm wheels are `cp312`-only; `UV_PYTHON_DOWNLOADS=never` makes a missing 3.12 fail loudly).
 3. Pinned ROCm 10 wheels installed from `https://wheels.vllm.ai/rocm/0.34.0/rocm100/`: `vllm==0.34.0+rocm100`, `torch==2.13.0+rocm10.0.0`, `triton==3.8.0+git669b31ac`, plus `huggingface-hub==2.4.0`/`safetensors==0.8.0`. The older `hub==1.31.0`/`safetensors==0.8.0` pair the pinned Transformers source expects is isolated in a separate `--target` deps dir.
-4. The CIRU runtime bundle is git-cloned at the pinned `v1.5.0` revision and `scripts/install.sh` runs: it verifies `MANIFEST.sha256`, checks the wheel versions and the `_rocm_C.abi3.so` native extension, fetches the two pinned source revisions (vLLM + Transformers), copies the overlay over the vLLM source tree, symlinks the wheel's native `.so`/`_version.py`/`vllm-rs` into it, and writes the prefix launcher `serve.sh`.
+4. The CIRU runtime bundle is git-cloned at the pinned `v1.6.0` revision and `scripts/install.sh` runs: it verifies `MANIFEST.sha256`, checks the wheel versions and the `_rocm_C.abi3.so` native extension, fetches the two pinned source revisions (vLLM + Transformers), copies the overlay over the vLLM source tree, symlinks the wheel's native `.so`/`_version.py`/`vllm-rs` into it, and writes the prefix launcher `serve.sh`.
 5. At runtime, `entrypoint.sh` turns `INKLING_*` env into `serve.sh` flags, then the generated wrapper sets `PYTHONPATH` (overlay first, then Transformers `src`, then its isolated deps), and the real `serve.sh` sources `rocr-env.sh` which `LD_PRELOAD`s the checksummed patched `libhsa-runtime64.so.1`. `$HOME/.cache` is a symlink to the `/cache` bind-mount so the Triton kernel build survives container recreation. `HF_HUB_OFFLINE=1` is set, so the weights must already be local at `/models`.
 
 The image does **not** contain a system ROCm — the wheels are self-contained and the runtime ships its own patched HSA runtime. The container distro (Ubuntu 24.04) is independent of the host distro; only the kernel and `/dev/kfd` are shared.
 
 ## Recommended sampling
 
-Inkling's default greedy DSpark path is lossless at any temperature, so there is no
-recommended sampling window (unlike a GLM-style recipe). `temperature 0` is exact; `temperature > 0` works via exact rejection sampling. The served model id is `main` in every payload.
+Inkling's default speculative path (DFlash 2 when the drafter is present, otherwise
+DSpark) is lossless at any temperature, so there is no recommended sampling window
+(unlike a GLM-style recipe). `temperature 0` is exact; `temperature > 0` works via
+exact rejection sampling. The served model id is `main` in every payload.
 
 Text request:
 
@@ -235,7 +242,7 @@ Common causes: missing GPU driver (`/dev/kfd` not present or not in `render`), `
 
 ## Model speed reference (AMD Strix Halo, Ryzen AI Max+ 395, 128 GB)
 
-v1.5.0 upstream measurements from the [model card](https://huggingface.co/jcbtc/Inkling-2-Mini-CIRU-Halo-Agent-gfx1151):
+Upstream **v1.5.0** baselines (adaptive DSpark, upstream host) from the [model card](https://huggingface.co/jcbtc/Inkling-2-Mini-CIRU-Halo-Agent-gfx1151):
 
 | Metric                                | Client tok/s | Server tok/s |
 | ------------------------------------- | ------------ | ------------ |
@@ -246,6 +253,30 @@ v1.5.0 upstream measurements from the [model card](https://huggingface.co/jcbtc/
 | Decode, 128K context                  | 46.8         | 50.2         |
 | Decode, `B=8` (concurrent)            | 194–208      | —            |
 | Cold startup                          | ~65 s        | —            |
+
+Measured **v1.6.0 with DFlash 2** on this host (2026-11-27, default vision profile:
+`--dflash2 ./models/dflash2 --context 1048576` with the derived ~52 GiB KV pool,
+`--batch-tokens 4096`, `--tools`, FULL target+draft graphs; `vllm bench serve`
+against the chat endpoint, random-prompt workloads, seed 42):
+
+| Workload                              | Output tok/s | Total tok/s | Mean TTFT | Mean TPOT | Acc. len |
+| ------------------------------------- | ------------ | ----------- | --------- | --------- | -------- |
+| Decode `B=1` `T=1.0` (`3×512t`)       | 57.1         | 73.0        | 191 ms    | 17.2 ms   | 2.74     |
+| Decode `B=1` greedy (`3×512t`)        | 61.4         | 78.6        | 135 ms    | 16.1 ms   | 2.87     |
+| Decode `B=8` `T=1.0` (`8×512t`)       | 150.7        | 192.8       | 494 ms    | 44.9 ms   | 2.66     |
+| Decode `B=8` greedy (`8×512t`)        | 167.6        | 214.4       | 279 ms    | 43.4 ms   | 2.73     |
+| Prefill 4K (`2×4096t→1t`)             | 2,546        | 2,546       | 1,608 ms  | —         | —        |
+| 128K sustained decode (`127k→512t`)   | 40.0         | 1,320       | 83.9 s    | 25.0 ms   | 2.99     |
+
+- 128K prefill derived from the last row's TTFT: 127,015 t / 83.9 s = **1,514 tok/s**
+  (upstream v1.6.0 reference 1,499–1,511 — parity). 4K prefill = input tokens / TTFT.
+- Random-token prompts are adversarial for the drafter: acceptance length lands at
+  2.7–2.9 here vs ~3.9–4.4 on the natural-text workloads behind the upstream v1.6.0
+  targets (`81.1`/`79.7`/`220`/`222` tok/s). Throughput scales with acceptance — the
+  128K row (acc 2.99) reproduces the upstream `40.96` tok/s sustained-decode target
+  almost exactly, and the same engine decodes the smoke-test math prompt at ~92 tok/s.
+- The 4K prefill row was measured against `/v1/completions`: with a 1-token budget the
+  chat endpoint emits only a reasoning delta, which the bench client cannot time as TTFT.
 
 ## Licence
 
